@@ -9,6 +9,7 @@ import io.restassured.filter.log.ResponseLoggingFilter;
 import io.restassured.http.ContentType;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.*;
+import com.example.utils.TestDataGenerator;
 
 import static com.github.tomakehurst.wiremock.client.WireMock.*;
 import static com.github.tomakehurst.wiremock.core.WireMockConfiguration.options;
@@ -19,17 +20,6 @@ public class TestBase {
     protected static final String BASE_URL = "http://localhost:8080";
     protected static final String MOCK_URL = "http://localhost:8888";
     protected static final String API_KEY = "qazWSXedc";
-
-    // ThreadLocal для изоляции спецификаций между потоками
-    private static final ThreadLocal<RequestSpecification> THREAD_LOCAL_SPEC =
-            ThreadLocal.withInitial(() -> null);
-
-    // ThreadLocal для номера порта WireMock (если нужно динамическое распределение)
-    private static final ThreadLocal<Integer> WIREMOCK_PORT =
-            ThreadLocal.withInitial(() -> 8888);
-
-    // Статический WireMock Server для всех тестов (если используется один порт)
-    // ИЛИ ThreadLocal если каждый тест нужен отдельный WireMock
 
     @BeforeAll
     static void setUpAll() {
@@ -55,10 +45,7 @@ public class TestBase {
 
         configureWireMockDefaults();
 
-        // ❌ УДАЛЕНО: Глобальная настройка AllureRestAssured
-        // RestAssured.filters(new AllureRestAssured());
-
-        // Вместо этого настраиваем базовые фильтры (без Allure)
+        // Базовые фильтры для всех запросов
         RestAssured.filters(
                 new RequestLoggingFilter(),
                 new ResponseLoggingFilter()
@@ -103,64 +90,54 @@ public class TestBase {
             configureWireMockDefaults();
         }
 
-        // СОЗДАЕМ ThreadLocal спецификацию ДЛЯ КАЖДОГО ТЕСТА
-        RequestSpecification spec = new RequestSpecBuilder()
-                .setBaseUri(BASE_URL)
-                .addHeader("X-Api-Key", API_KEY)
-                .setContentType(ContentType.URLENC)
-                .setAccept(ContentType.JSON)
-                .addFilter(new AllureRestAssured()) // ✅ Добавляем Allure фильтр локально
-                .build();
-
-        // Сохраняем в ThreadLocal
-        THREAD_LOCAL_SPEC.set(RestAssured.given().spec(spec));
-
-        // НЕ устанавливаем глобально: RestAssured.requestSpecification = spec;
-
         RestAssured.enableLoggingOfRequestAndResponseIfValidationFails();
-    }
-
-    @AfterEach
-    void tearDown(TestInfo testInfo) {
-        System.out.println("=== [TEARDOWN] Finished test: " + testInfo.getDisplayName() +
-                " in thread: " + Thread.currentThread().getName() + " ===");
-
-        // ОЧИЩАЕМ ThreadLocal после каждого теста
-        THREAD_LOCAL_SPEC.remove();
     }
 
     @AfterAll
     static void tearDownAll() {
-        // Очищаем все ThreadLocal
-        THREAD_LOCAL_SPEC.remove();
-        WIREMOCK_PORT.remove();
-
         if (wireMockServer != null && wireMockServer.isRunning()) {
             wireMockServer.stop();
             System.out.println("=== [INFO] WireMock stopped ===");
         }
     }
 
-    // ==================== УДОБНЫЕ МЕТОДЫ ДЛЯ ТЕСТОВ ====================
+    // ==================== ОСНОВНЫЕ МЕТОДЫ ДЛЯ ТЕСТОВ ====================
 
     /**
-     * Получить RequestSpecification для текущего потока
-     * Содержит AllureRestAssured фильтр
+     * Получить ЧИСТЫЙ RequestSpecification для нового запроса
+     * Каждый вызов создает новую независимую спецификацию
      */
     protected RequestSpecification given() {
-        RequestSpecification spec = THREAD_LOCAL_SPEC.get();
-        if (spec == null) {
-            throw new IllegalStateException("RequestSpecification не инициализирован. " +
-                    "Убедитесь, что тест выполняется в правильном контексте.");
-        }
-        return spec;
+        return RestAssured.given()
+                .spec(baseSpecBuilder().build());
+    }
+    /**
+    * Спецификаци без X-Api-Key
+
+     */
+    protected RequestSpecification givenWithoutApiKey() {
+        return RestAssured.given()
+                .baseUri(BASE_URL)
+                .contentType(ContentType.URLENC)  // БЕЗ X-Api-Key!
+                .accept(ContentType.JSON);
     }
 
     /**
-     * Получить RequestSpecification без Allure фильтра
-     * (например, для wiremock проверок)
+     * Билдер базовой спецификации
      */
-    protected RequestSpecification givenWithoutAllure() {
+    private RequestSpecBuilder baseSpecBuilder() {
+        return new RequestSpecBuilder()
+                .setBaseUri(BASE_URL)
+                .addHeader("X-Api-Key", API_KEY)
+                .setContentType(ContentType.URLENC)
+                .setAccept(ContentType.JSON)
+                .addFilter(new AllureRestAssured());
+    }
+
+    /**
+     * Получить RequestSpecification для быстрых запросов без Allure
+     */
+    protected RequestSpecification givenSimple() {
         return RestAssured.given()
                 .baseUri(BASE_URL)
                 .header("X-Api-Key", API_KEY)
@@ -169,23 +146,7 @@ public class TestBase {
     }
 
     /**
-     * Получить RequestSpecification с кастомным Allure фильтром
-     */
-    protected RequestSpecification givenWithCustomAllure() {
-        AllureRestAssured customFilter = new AllureRestAssured()
-                .setRequestTemplate("http-request.ftl")
-                .setResponseTemplate("http-response.ftl");
-
-        return RestAssured.given()
-                .baseUri(BASE_URL)
-                .header("X-Api-Key", API_KEY)
-                .contentType(ContentType.URLENC)
-                .accept(ContentType.JSON)
-                .filter(customFilter);
-    }
-
-    /**
-     * Получить RequestSpecification для работы с WireMock
+     * Получить RequestSpecification для WireMock запросов
      */
     protected RequestSpecification givenForWireMock() {
         return RestAssured.given()
@@ -194,17 +155,36 @@ public class TestBase {
                 .accept(ContentType.JSON);
     }
 
+    /**
+     * Создать новый независимый запрос с нуля
+     * Полезно для последовательных запросов в одном тесте
+     */
+    protected RequestSpecification newRequest() {
+        return RestAssured.given()
+                .baseUri(BASE_URL)
+                .header("X-Api-Key", API_KEY)
+                .contentType(ContentType.URLENC)
+                .accept(ContentType.JSON)
+                .filter(new AllureRestAssured());
+    }
+
     // ==================== УТИЛИТЫ ====================
 
     protected String generateToken() {
-        return com.example.utils.TestDataGenerator.generateValidToken();
+        return TestDataGenerator.generateValidToken();
     }
 
+    /**
+     * Настройка WireMock для успешных ответов
+     */
     protected void setupWireMockForSuccess() {
         wireMockServer.stubFor(post("/auth").willReturn(ok()));
         wireMockServer.stubFor(post("/doAction").willReturn(ok()));
     }
 
+    /**
+     * Настройка WireMock для ошибочных ответов
+     */
     protected void setupWireMockForError(int statusCode) {
         wireMockServer.stubFor(post("/auth").willReturn(aResponse().withStatus(statusCode)));
         wireMockServer.stubFor(post("/doAction").willReturn(aResponse().withStatus(statusCode)));
@@ -219,18 +199,36 @@ public class TestBase {
     }
 
     /**
-     * Вспомогательный метод для отладки параллельных тестов
+     * Метод для тестов с несколькими запросами
+     * Гарантирует изоляцию между запросами
      */
-    protected void logThreadInfo(String message) {
-        System.out.println("[THREAD " + Thread.currentThread().getId() +
-                " | " + Thread.currentThread().getName() + "] " + message);
+    protected void executeIsolatedRequest(Runnable request) {
+        RequestSpecification originalGlobalSpec = RestAssured.requestSpecification;
+        try {
+            // Временно сбрасываем глобальную спецификацию
+            RestAssured.requestSpecification = null;
+            request.run();
+        } finally {
+            // Восстанавливаем
+            RestAssured.requestSpecification = originalGlobalSpec;
+        }
     }
 
     /**
-     * Метод для проверки, что Allure фильтр работает корректно
+     * Выполнить запрос с полным логированием для отладки
      */
-    protected void validateAllureSetup() {
-        System.out.println("=== [ALLURE VALIDATION] Thread: " + Thread.currentThread().getName() +
-                ", Spec: " + (THREAD_LOCAL_SPEC.get() != null ? "OK" : "NULL") + " ===");
+    protected void debugRequest(String token, String action) {
+        System.out.println("=== [DEBUG REQUEST] ===");
+        System.out.println("Token: " + token);
+        System.out.println("Action: " + action);
+
+        newRequest()
+                .formParam("token", token)
+                .formParam("action", action)
+                .log().all()
+                .when()
+                .post("/endpoint")
+                .then()
+                .log().all();
     }
 }
